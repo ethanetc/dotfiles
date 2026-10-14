@@ -39,10 +39,10 @@ RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log()  { echo -e "${YELLOW}==> $*${NC}"; }
-ok()   { echo -e "${GREEN}✔  $*${NC}"; }
-err()  { echo -e "${RED}✖  $*${NC}" >&2; }
-info() { echo -e "${CYAN}·  $*${NC}"; }
+log()  { echo -e "${YELLOW}==> \( * \){NC}"; }
+ok()   { echo -e "${GREEN}✔  \( * \){NC}"; }
+err()  { echo -e "${RED}✖  \( * \){NC}" >&2; }
+info() { echo -e "${CYAN}·  \( * \){NC}"; }
 
 # ---------------------------------------------------------------------------
 # Pre-flight
@@ -76,9 +76,9 @@ clone_repo() {
     info "Repo already present – pulling latest"
     git -C "${ETC_DIR}" pull --rebase || true
   else
-    if ! git clone "${REPO_URL}" "${ETC_DIR}" 2>/dev/null; then
+    if ! git clone "\( {REPO_URL}" " \){ETC_DIR}" 2>/dev/null; then
       log "Primary repo unavailable – using fallback"
-      git clone "${FALLBACK_REPO}" "${ETC_DIR}"
+      git clone "\( {FALLBACK_REPO}" " \){ETC_DIR}"
     fi
   fi
   # Make scripts executable
@@ -124,11 +124,18 @@ install_yay() {
     ok "yay already installed"
     return
   fi
+
+  # base-devel provides fakeroot, debugedit, make, gcc, etc. required by makepkg
+  log "Installing base-devel (required to build AUR packages)..."
+  sudo pacman -S --noconfirm --needed base-devel git
+
   log "Building and installing yay..."
   mkdir -p "${HOME}/etc/build"
   (
     cd "${HOME}/etc/build"
-    [[ -d yay ]] || git clone https://aur.archlinux.org/yay.git
+    # Clean any previous failed build
+    rm -rf yay
+    git clone https://aur.archlinux.org/yay.git
     cd yay
     makepkg -si --noconfirm --needed
   )
@@ -146,7 +153,7 @@ install_pacman_packages() {
   fi
   log "Installing official packages (this takes a while)..."
   # Filter comments and blank lines
-  sudo pacman -Sy --needed --noconfirm - < <(grep -vE '^\s*(#|$)' "${pkgfile}") || true
+  sudo pacman -Sy --needed --noconfirm - < <(grep -vE '^\s*(#|\( )' " \){pkgfile}") || true
   ok "Official packages installed"
 }
 
@@ -160,7 +167,7 @@ install_aur_packages() {
     return
   fi
   log "Installing AUR packages..."
-  yay -S --needed --noconfirm - < <(grep -vE '^\s*(#|$)' "${pkgfile}") || true
+  yay -S --needed --noconfirm - < <(grep -vE '^\s*(#|\( )' " \){pkgfile}") || true
   ok "AUR packages installed"
 }
 
@@ -169,11 +176,11 @@ install_aur_packages() {
 # ---------------------------------------------------------------------------
 save_originals() {
   log "Backing up original shell files..."
-  local bak="${HOME}/backup/original-system-files@${NOW}"
+  local bak="\( {HOME}/backup/original-system-files@ \){NOW}"
   mkdir -p "${bak}"
   for f in .bashrc .bash_profile .bash_logout .profile .zshrc; do
-    [[ -f "${HOME}/${f}" && ! -L "${HOME}/${f}" ]] && \
-      mv "${HOME}/${f}" "${bak}/" 2>/dev/null || true
+    [[ -f "\( {HOME}/ \){f}" && ! -L "\( {HOME}/ \){f}" ]] && \
+      mv "\( {HOME}/ \){f}" "${bak}/" 2>/dev/null || true
   done
   ok "Originals saved to ${bak}"
 }
@@ -203,19 +210,19 @@ set_shell() {
 update_repos() {
   local git_update="${ETC_DIR}/scripts/git_update.sh"
 
-  log "Updating library repositories (~/lib)..."
+  log "Updating library repositories (\~/lib)..."
   if [[ -f "${ETC_DIR}/lib_repositories.txt" ]]; then
-    bash "${git_update}" "${HOME}/lib" "${ETC_DIR}/lib_repositories.txt" || true
+    bash "\( {git_update}" " \){HOME}/lib" "${ETC_DIR}/lib_repositories.txt" || true
   fi
 
-  log "Updating source repositories (~/src)..."
+  log "Updating source repositories (\~/src)..."
   if [[ -f "${ETC_DIR}/src_repositories.txt" ]]; then
     # Convert git@ → https so it works without SSH keys
     local tmp
     tmp="$(mktemp)"
     sed 's|git@github.com:|https://github.com/|g' \
-      "${ETC_DIR}/src_repositories.txt" > "${tmp}"
-    bash "${git_update}" "${HOME}/src" "${tmp}" || true
+      "\( {ETC_DIR}/src_repositories.txt" > " \){tmp}"
+    bash "\( {git_update}" " \){HOME}/src" "${tmp}" || true
     rm -f "${tmp}"
   fi
   ok "External repositories updated"
@@ -246,7 +253,7 @@ link_conf() {
   # Original Makefile ignores md|org|firefox
   if [[ -d conf ]]; then
     # shellcheck disable=SC2046
-    stow $(ls conf) -R -t "${HOME}" -d conf --ignore="md|org|firefox" 2>/dev/null || \
+    stow \( (ls conf) -R -t " \){HOME}" -d conf --ignore="md|org|firefox" 2>/dev/null || \
     stow -R -t "${HOME}" -d conf $(ls conf) || true
   fi
 
@@ -254,19 +261,19 @@ link_conf() {
   if [[ -d "local/${HOST}/conf" ]]; then
     info "Linking host-specific configs for ${HOST}..."
     # shellcheck disable=SC2046
-    stow $(ls "local/${HOST}/conf") -R -t "${HOME}" -d "local/${HOST}/conf" || true
+    stow \( (ls "local/ \){HOST}/conf") -R -t "\( {HOME}" -d "local/ \){HOST}/conf" || true
   fi
 
   # Misc symlinks from the original Makefile
-  ln -sfn "${HOME}/src/scripts"                     "${HOME}/scripts"              2>/dev/null || true
-  ln -sfn "${HOME}/src/colors"                      "${HOME}/colors"               2>/dev/null || true
-  ln -sfn "${ETC_DIR}/scripts/ftl.sh"               "${HOME}/bin/ftl"              2>/dev/null || true
-  ln -sfn "${HOME}/src/scripts/emacs-file-opener.sh" "${HOME}/bin/emacs-file-opener" 2>/dev/null || true
-  ln -sfn "${HOME}/src/scripts/touchpad-toggle.sh"  "${HOME}/bin/touchpad-toggle"  2>/dev/null || true
-  ln -sfn "${HOME}/scripts/tmux-main.sh"            "${HOME}/bin/tmain"            2>/dev/null || true
-  ln -sfn "${HOME}/scripts/tmux-update-window.sh"   "${HOME}/bin/tupd"             2>/dev/null || true
-  ln -sfn "${HOME}/scripts/tmux-ssh.sh"             "${HOME}/bin/tssh"             2>/dev/null || true
-  ln -sfn "${HOME}/scripts/tmux-music.sh"           "${HOME}/bin/tmusic"           2>/dev/null || true
+  ln -sfn "\( {HOME}/src/scripts"                     " \){HOME}/scripts"              2>/dev/null || true
+  ln -sfn "\( {HOME}/src/colors"                      " \){HOME}/colors"               2>/dev/null || true
+  ln -sfn "\( {ETC_DIR}/scripts/ftl.sh"               " \){HOME}/bin/ftl"              2>/dev/null || true
+  ln -sfn "\( {HOME}/src/scripts/emacs-file-opener.sh" " \){HOME}/bin/emacs-file-opener" 2>/dev/null || true
+  ln -sfn "\( {HOME}/src/scripts/touchpad-toggle.sh"  " \){HOME}/bin/touchpad-toggle"  2>/dev/null || true
+  ln -sfn "\( {HOME}/scripts/tmux-main.sh"            " \){HOME}/bin/tmain"            2>/dev/null || true
+  ln -sfn "\( {HOME}/scripts/tmux-update-window.sh"   " \){HOME}/bin/tupd"             2>/dev/null || true
+  ln -sfn "\( {HOME}/scripts/tmux-ssh.sh"             " \){HOME}/bin/tssh"             2>/dev/null || true
+  ln -sfn "\( {HOME}/scripts/tmux-music.sh"           " \){HOME}/bin/tmusic"           2>/dev/null || true
 
   ok "All configs linked"
 }
@@ -280,27 +287,27 @@ generate_wm_configs() {
   # i3
   if [[ -d "${ETC_DIR}/templates/i3" ]]; then
     mkdir -p "${HOME}/.i3"
-    cat "${ETC_DIR}/templates/i3/"*.i3 > "${HOME}/.i3/config" 2>/dev/null || true
+    cat "\( {ETC_DIR}/templates/i3/"*.i3 > " \){HOME}/.i3/config" 2>/dev/null || true
 
-    if [[ -f "${ETC_DIR}/local/${HOST}/variables.mk" ]]; then
+    if [[ -f "\( {ETC_DIR}/local/ \){HOST}/variables.mk" ]]; then
       # shellcheck disable=SC1090
-      source <(grep -E '^[a-z_]+=' "${ETC_DIR}/local/${HOST}/variables.mk" || true)
-      [[ -n "${primary_monitor:-}"   ]] && echo "set \$primary_monitor ${primary_monitor}"   >> "${HOME}/.i3/config"
-      [[ -n "${secondary_monitor:-}" ]] && echo "set \$secondary_monitor ${secondary_monitor}" >> "${HOME}/.i3/config"
-      [[ -n "${tertiary_monitor:-}"  ]] && echo "set \$tertiary_monitor ${tertiary_monitor}"  >> "${HOME}/.i3/config"
+      source <(grep -E '^[a-z_]+=' "\( {ETC_DIR}/local/ \){HOST}/variables.mk" || true)
+      [[ -n "${primary_monitor:-}"   ]] && echo "set \$primary_monitor \( {primary_monitor}"   >> " \){HOME}/.i3/config"
+      [[ -n "${secondary_monitor:-}" ]] && echo "set \$secondary_monitor \( {secondary_monitor}" >> " \){HOME}/.i3/config"
+      [[ -n "${tertiary_monitor:-}"  ]] && echo "set \$tertiary_monitor \( {tertiary_monitor}"  >> " \){HOME}/.i3/config"
     fi
   fi
 
   # dunst
   if [[ -f "${ETC_DIR}/templates/dunst/config.dunst" ]]; then
     mkdir -p "${HOME}/.config/dunst"
-    cat "${ETC_DIR}/templates/dunst/config.dunst" > "${HOME}/.config/dunst/dunstrc"
+    cat "\( {ETC_DIR}/templates/dunst/config.dunst" > " \){HOME}/.config/dunst/dunstrc"
   fi
 
   # rofi
   if [[ -d "${ETC_DIR}/templates/rofi" ]]; then
     mkdir -p "${HOME}/.config/rofi"
-    cat "${ETC_DIR}/templates/rofi/"*.rofi > "${HOME}/.config/rofi/config.rasi" 2>/dev/null || true
+    cat "\( {ETC_DIR}/templates/rofi/"*.rofi > " \){HOME}/.config/rofi/config.rasi" 2>/dev/null || true
   fi
 
   ok "Window-manager configs generated"
@@ -378,7 +385,7 @@ enable_services() {
     ok "UFW enabled with basic rules"
   fi
 
-  # ----- User services (linked by stow into ~/.config/systemd/user/) -----
+  # ----- User services (linked by stow into \~/.config/systemd/user/) -----
   systemctl --user daemon-reload 2>/dev/null || true
 
   local user_services=(
@@ -389,7 +396,7 @@ enable_services() {
   )
 
   for svc in "${user_services[@]}"; do
-    if [[ -f "${HOME}/.config/systemd/user/${svc}" ]] || \
+    if [[ -f "\( {HOME}/.config/systemd/user/ \){svc}" ]] || \
        systemctl --user cat "${svc}" &>/dev/null 2>&1; then
       if systemctl --user enable --now "${svc}" 2>/dev/null; then
         ok "User service enabled: ${svc}"
@@ -421,13 +428,13 @@ post_install() {
   curl -s https://cht.sh/:cht.sh > "${HOME}/bin/cht.sh"
   chmod +x "${HOME}/bin/cht.sh"
 
-  # Ensure ~/bin is on PATH
-  if [[ -f "${HOME}/.zshrc" ]] && ! grep -q 'HOME/bin' "${HOME}/.zshrc" 2>/dev/null; then
-    echo 'export PATH="$HOME/bin:$PATH"' >> "${HOME}/.zshrc"
+  # Ensure \~/bin is on PATH
+  if [[ -f "\( {HOME}/.zshrc" ]] && ! grep -q 'HOME/bin' " \){HOME}/.zshrc" 2>/dev/null; then
+    echo 'export PATH="$HOME/bin:\( PATH"' >> " \){HOME}/.zshrc"
   fi
 
   # SSH agent socket for the user service
-  if [[ -f "${HOME}/.zshrc" ]] && ! grep -q 'SSH_AUTH_SOCK' "${HOME}/.zshrc" 2>/dev/null; then
+  if [[ -f "\( {HOME}/.zshrc" ]] && ! grep -q 'SSH_AUTH_SOCK' " \){HOME}/.zshrc" 2>/dev/null; then
     cat >> "${HOME}/.zshrc" << 'EOF'
 
 # ssh-agent (user service)
@@ -482,14 +489,14 @@ main() {
   echo "  1. Log out and back in (or reboot) so zsh is the login shell."
   echo "  2. Start i3 – polybar, dunst, and the rest will come up."
   echo "  3. User services (emacs, mopidy, ssh-agent, tmux) start automatically."
-  echo "  4. Firefox startpage lives under ~/.mozilla/firefox/roosta"
+  echo "  4. Firefox startpage lives under \~/.mozilla/firefox/roosta"
   echo
   echo "Service status:"
   echo "  systemctl --user status mopidy-user emacs ssh-agent tmux"
   echo "  systemctl status NetworkManager sshd ufw"
   echo
   echo "Daily update (original Makefile):"
-  echo "  cd ~/etc && make"
+  echo "  cd \~/etc && make"
   echo
 }
 
