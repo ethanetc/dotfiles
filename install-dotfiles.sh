@@ -20,11 +20,6 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/mrslackwaresmo-ai/dotfilesetc.git}"
 FALLBACK_REPO="https://github.com/roosta/etc.git"
 ETC_DIR="${ETC_DIR:-$HOME/etc}"
-
-# hostname is not always present on minimal installs
-HOST="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || uname -n 2>/dev/null || echo "localhost")"
-NOW="$(date +"%Y-%m-%dT%T")"
-
 YELLOW='\033[0;33m'
 GREEN='\033[1;32m'
 RED='\033[0;31m'
