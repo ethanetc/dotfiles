@@ -39,7 +39,7 @@ NOW="$(date +%Y-%m-%dT%T)"
 BACKUP_DIR="${HOME}/backup/original-system-files@${NOW}"
 
 REPO_URL_GIVEN="${REPO_URL:+1}"
-REPO_URL="${REPO_URL:-https://github.com/mrslackwaresmo-ai/dotfilesetc.git}"
+REPO_URL="${REPO_URL:-https://github.com/ethanetc/dotfiles.git}"
 UPSTREAM_REPO_URL="https://github.com/roosta/etc.git"
 SCRIPTS_URL="https://github.com/roosta/scripts.git"
 DOTFILES_ZIP="${DOTFILES_ZIP:-}"
