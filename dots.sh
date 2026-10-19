@@ -92,6 +92,7 @@ EXTRA_PACMAN=(
   clipmenu flameshot lxqt-policykit gnome-keyring gnome-themes-extra
   pacman-contrib networkmanager jq nodejs npm jdk-openjdk leiningen
   git stow make curl unzip
+  jgmenu tk                                             # right-click program menu (jgmenu + tkinter click catcher)
 )
 EXTRA_AUR=(
   ttf-iosevka ttf-iosevka-term                          # font in every picture
@@ -563,6 +564,16 @@ EOF
   if ! grep -q '^client.focused ' "$conf"; then
     sed -i -E 's|^(client\.placeholder .*)$|client.focused          $magenta $magenta $bright_white $cyan    $magenta\nclient.focused_inactive #2D2B28  #2D2B28  $bright_white #2D2B28  #2D2B28\nclient.unfocused        #2D2B28  #2D2B28  $bright_white #2D2B28  #2D2B28\nclient.urgent           $yellow  $yellow  $black        $yellow  $yellow\n\1|' "$conf"
   fi
+
+  # Right-click menus (no keys needed): right-click the title bar / window border
+  # anywhere, or the empty desktop, to open the program menu. Keyboard binds stay.
+  put "$ETC_DIR/templates/i3/zz-rightclick.i3" <<'EOF'
+
+# Right-click menu {{{
+bindsym button3 exec --no-startup-id ~/bin/etc-menu
+exec --no-startup-id ~/bin/etc-desktop
+# }}}
+EOF
 }
 
 overlay_polybar() {
@@ -962,6 +973,64 @@ case "${1:-}" in
   *)
     exec rofi -dpi "$dpi" -theme-str "$theme" "$@" ;;
 esac
+EOF
+
+  # right-click menu: jgmenu at the pointer, sized for the current DPI
+  put "$ETC_DIR/conf/etc-bin/bin/etc-menu" 755 <<'EOF'
+#!/usr/bin/env bash
+# Program menu at the mouse pointer (written by dots.sh).
+# Edit ~/.config/jgmenu/menu.csv to change the entries.
+dpi=$(xrdb -query 2>/dev/null | awk '/^Xft\.dpi:/ {printf "%d", $2; exit}')
+[ -n "$dpi" ] || dpi=96
+sc() { echo $(( $1 * dpi / 96 )); }
+cfg="$HOME/.config/jgmenu"; mkdir -p "$cfg"
+cat > "$cfg/jgmenurc" <<RC
+font = Iosevka 11
+icon_size = 0
+menu_width = $(sc 260)
+item_height = $(sc 30)
+item_padding_x = $(sc 12)
+menu_padding_top = $(sc 6)
+menu_padding_bottom = $(sc 6)
+menu_margin_x = 0
+menu_margin_y = 0
+menu_border = $(sc 1)
+menu_radius = 0
+sub_hover_action = 1
+color_menu_bg = #1C1B19 100
+color_menu_border = #E02C6D 100
+color_norm_bg = #1C1B19 0
+color_norm_fg = #FCE8C3 100
+color_sel_bg = #2D2B28 100
+color_sel_fg = #FF5C8F 100
+color_sep_fg = #5E5C56 100
+RC
+pkill -x jgmenu 2>/dev/null   # a second right-click replaces the open menu
+exec jgmenu --at-pointer --config-file="$cfg/jgmenurc" --csv-file="$cfg/menu.csv"
+EOF
+
+  # desktop click catcher: an invisible desktop-type window, so a right-click on
+  # the empty desktop opens the menu (i3 itself has no desktop to click)
+  put "$ETC_DIR/conf/etc-bin/bin/etc-desktop" 755 <<'EOF'
+#!/usr/bin/env python3
+# Invisible full-screen desktop window; right-click opens ~/bin/etc-menu. Needs picom.
+import os, subprocess, sys, tkinter as tk
+lock = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "etc-desktop.pid")
+try:
+    pid = int(open(lock).read())
+    os.kill(pid, 0)
+    sys.exit(0)              # already running
+except (OSError, ValueError):
+    pass
+open(lock, "w").write(str(os.getpid()))
+menu = os.path.expanduser("~/bin/etc-menu")
+root = tk.Tk()
+root.title("etc-desktop")
+root.attributes("-type", "desktop")
+root.attributes("-alpha", 0.0)
+root.geometry("%dx%d+0+0" % (root.winfo_screenwidth(), root.winfo_screenheight()))
+root.bind("<Button-3>", lambda e: subprocess.Popen([menu]))
+root.mainloop()
 EOF
 }
 
@@ -1855,6 +1924,34 @@ enable_services() {
 # -----------------------------------------------------------------------------
 # 13. Wrap-up
 # -----------------------------------------------------------------------------
+# Default right-click menu; written once so your own edits survive re-runs.
+setup_rightclick() {
+  local d="${HOME}/.config/jgmenu"
+  mkdir -p "$d"
+  [[ -e $d/menu.csv ]] && return 0
+  cat > "$d/menu.csv" <<'EOF'
+Terminal,alacritty
+Firefox,firefox
+Files,alacritty -e ranger
+Music,alacritty -e ncmpcpp
+Editor,alacritty -e nvim
+System monitor,alacritty -e vtop
+Volume,pavucontrol
+Screenshot,flameshot gui
+^sep()
+All applications...,~/bin/etc-rofi -show drun
+^sep()
+Session,^checkout(session)
+^tag(session)
+Lock,i3lock -c 1c1b19
+Restart i3,i3-msg restart
+Log out,i3-msg exit
+Reboot,systemctl reboot
+Power off,systemctl poweroff
+EOF
+  ok "Right-click menu: ~/.config/jgmenu/menu.csv"
+}
+
 summary() {
   rm -rf "${ETC_DIR}/build" 2>/dev/null || true
   echo
@@ -1876,6 +1973,8 @@ Done. Log out and log back in on tty1 - X and i3 start by themselves.
   Super+c       close window             Super+End  lock / logout / reboot
   Super+q/w/e   workspaces Q:term W:edit E:www, Super+1..4 the numbered ones
   Super+Shift+r restart i3               \` is the tmux prefix
+  Right-click   program menu: on the empty desktop or on any title bar / border
+                (edit ~/.config/jgmenu/menu.csv)
 
   Re-apply configs any time:  bash dots.sh --configs-only
   Different DPI:              ETC_DPI=96 bash dots.sh --configs-only
@@ -1919,6 +2018,7 @@ main() {
   make_wallpaper
   setup_mopidy
   setup_bat
+  setup_rightclick
 
   if ((DO_PLUGINS)); then
     setup_zplug
