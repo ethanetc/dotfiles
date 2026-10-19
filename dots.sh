@@ -18,6 +18,7 @@
 #                       [--skip-services] [--no-startpage] [-h|--help]
 #
 #    --configs-only   only (re)apply configs: no packages, plugins or services
+#                     (the static start page is still written; it needs no build)
 #
 #  Environment overrides:
 #    PROFILE=ethan|lintilla|garkbit|allitnil   machine profile (default: ethan,
@@ -29,12 +30,21 @@
 #    USER_SERVICES="a.service b.socket"  user units to enable
 #    SKIP_PKGS="pkg1 pkg2"               extra packages to skip
 #    KEEP_AWESOME=1                      do not uninstall awesome
+#    STARTPAGE=static|build|none         Firefox start page: static (default, a
+#                                         self-contained page, no build), build (the
+#                                         old roosta/startpage lein+npm build, slow
+#                                         and fragile) or none
 #
 #  Run it as your normal user (it uses sudo when needed). Safe to re-run.
 #  Non-fatal problems are collected and printed at the end.
 # =============================================================================
 
 set -uo pipefail
+
+# A renamed/deleted/private GitHub repo makes git ask for a username, which looks
+# like a hang inside a script. Never prompt; fail fast instead.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=/bin/true
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -46,7 +56,9 @@ BACKUP_DIR="${HOME}/backup/original-system-files@${NOW}"
 
 REPO_URL="${REPO_URL:-https://github.com/ethanetc/dotfiles.git}"
 SCRIPTS_URL="https://github.com/roosta/scripts.git"
-STARTPAGE_URL="https://github.com/roosta/startpage.git"
+STARTPAGE_URL="https://github.com/roosta/startpage.git"   # only used by STARTPAGE=build
+STARTPAGE="${STARTPAGE:-static}"
+STARTPAGE_HOME=""
 CLEAN_JPG_URL="https://raw.githubusercontent.com/roosta/assets/master/etc/clean.jpg"
 DOTFILES_ZIP="${DOTFILES_ZIP:-}"
 PROFILE="${PROFILE:-ethan}"
@@ -176,7 +188,7 @@ usage() {
 parse_args() {
   while (($#)); do
     case "$1" in
-      --configs-only)  DO_PACKAGES=0; DO_PLUGINS=0; DO_SERVICES=0; DO_STARTPAGE=0 ;;
+      --configs-only)  DO_PACKAGES=0; DO_PLUGINS=0; DO_SERVICES=0 ;;
       --skip-packages) DO_PACKAGES=0 ;;
       --skip-plugins)  DO_PLUGINS=0 ;;
       --skip-services) DO_SERVICES=0 ;;
@@ -281,7 +293,7 @@ fetch_from_remote() {
   local tmp z
   tmp="$(mktemp -d)"
   log "Cloning ${REPO_URL}"
-  GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 "$REPO_URL" "$tmp/repo" \
+  timeout 300 git clone --quiet --depth 1 "$REPO_URL" "$tmp/repo" \
     || { rm -rf "$tmp"; die "Could not clone ${REPO_URL} (offline, or the repo is private?)"; }
   # Keep the repo's extras (e.g. wallpaper.jpg) next to the zip for later steps.
   [[ -f $tmp/repo/wallpaper.jpg ]] && { mkdir -p "$(dirname "$WALLPAPER")"; cp -n "$tmp/repo/wallpaper.jpg" "$WALLPAPER"; }
@@ -325,14 +337,28 @@ rewrite_home_paths() {
     sed -i "s|/home/roosta|${repl}|g" "${files[@]}"
     info "rewrote /home/roosta -> ${HOME} in ${#files[@]} files"
   fi
-  local l t
-  while IFS= read -r -d '' l; do
-    t="$(readlink "$l")"
-    [[ $t == /home/roosta/* ]] && ln -sfn "${HOME}/${t#/home/roosta/}" "$l"
-  done < <(find "$ETC_DIR" -path "$ETC_DIR/.git" -prune -o -type l -print0)
   # links to things that no longer exist anywhere
   rm -f "$ETC_DIR/conf/vimperator/.vimperator/plugin/alias.js" \
         "$ETC_DIR/conf/vimperator/.vimperator/plugin/caret-hint.js"
+  relativize_symlinks
+}
+
+# stow 2.4+ aborts the WHOLE run ("source is an absolute symlink") when a package
+# contains a symlink with an absolute target, so nothing in conf/ got linked.
+# Turn every absolute link in the tree into a relative one (same destination).
+relativize_symlinks() {
+  local l t rel n=0
+  [[ -d $ETC_DIR ]] || return 0
+  while IFS= read -r -d '' l; do
+    t="$(readlink "$l")"
+    [[ $t == /* ]] || continue
+    if [[ $t == /home/roosta/* && $HOME != /home/roosta ]]; then t="${HOME}/${t#/home/roosta/}"; fi
+    rel="$(realpath -ms --relative-to="$(dirname -- "$l")" -- "$t" 2>/dev/null)" || continue
+    [[ -n $rel ]] || continue
+    ln -sfn -- "$rel" "$l" && n=$((n + 1))
+  done < <(find "$ETC_DIR/conf" "$ETC_DIR/local" -type l -print0 2>/dev/null)
+  ((n == 0)) || info "made ${n} absolute symlinks relative (stow refuses absolute ones)"
+  return 0
 }
 
 # -----------------------------------------------------------------------------
@@ -1153,15 +1179,15 @@ sync_repo() {  # sync_repo <url> <parent> [branch] [dirname]
   if [[ -z $name ]]; then name="${url##*/}"; name="${name%.git}"; fi
   local dest="${parent}/${name}"
   if [[ -d $dest/.git ]]; then
-    git -C "$dest" pull --ff-only --quiet 2>/dev/null && info "updated ${name}" \
+    timeout 120 git -C "$dest" pull --ff-only --quiet 2>/dev/null && info "updated ${name}" \
       || info "kept ${dest} as it is (local changes or offline)"
   elif [[ -e $dest ]]; then
     warn "${dest} exists and is not a git checkout - skipped"
   else
     local -a args=(clone --quiet --depth 1)
     [[ -n $branch ]] && args+=(--branch "$branch" --single-branch)
-    if GIT_TERMINAL_PROMPT=0 git "${args[@]}" "$url" "$dest"; then ok "cloned ${name}"
-    else warn "could not clone ${url}"; fi
+    if timeout 180 git "${args[@]}" "$url" "$dest"; then ok "cloned ${name}"
+    else rm -rf "$dest"; warn "could not clone ${url} (renamed, deleted or private? edit the list in ~/etc)"; fi
   fi
 }
 
@@ -1170,6 +1196,9 @@ sync_list() {  # sync_list <parent> <listfile>   (git@github.com: -> https, no S
   mkdir -p "$parent"
   while IFS= read -r url; do
     url="${url/#git@github.com:/https://github.com/}"
+    url="${url/#ssh:\/\/git@github.com\//https://github.com/}"
+    url="${url/#git:\/\/github.com\//https://github.com/}"
+    url="${url/#http:\/\/github.com\//https://github.com/}"
     sync_repo "$url" "$parent"
   done < <(read_list "$list")
 }
@@ -1266,6 +1295,9 @@ stow_dir() {  # stow_dir <dir relative to ~/etc> [extra stow args]
     out="$(cd "$ETC_DIR" && stow --no-folding -R -t "$HOME" -d "$dir" "$@" "${pkgs[@]}" 2>&1)"; rc=$?
     if ((rc == 0)); then ok "linked ${#pkgs[@]} packages from ${dir}"; return 0; fi
     mapfile -t conflicts < <(parse_stow_conflicts <<<"$out" | awk 'NF && !seen[$0]++')
+    if ((${#conflicts[@]} == 0)) && grep -q 'absolute symlink' <<<"$out"; then
+      relativize_symlinks; continue          # fixed at the source; just retry
+    fi
     if ((${#conflicts[@]} == 0)); then
       warn "stow failed for ${dir}: ${out}"; return 1
     fi
@@ -1276,6 +1308,7 @@ stow_dir() {  # stow_dir <dir relative to ~/etc> [extra stow args]
 
 link_conf() {
   log "Linking configs with stow (old files are moved to ${BACKUP_DIR/#$HOME/~})..."
+  relativize_symlinks
   # bash dotfiles from the distro are replaced by the repo's (the Makefile's save-originals)
   stow_dir conf --ignore="$STOW_IGNORE"
   stow_dir "local/${PROFILE}/conf"
@@ -1489,14 +1522,104 @@ setup_bat() {
   bat cache --build >/dev/null 2>&1 || true
 }
 
+# Default: a static page written from ~/.config/startpage/links.txt. Nothing to
+# build, nothing to hang (the old lein+npm ClojureScript build of roosta/startpage
+# could sit silently for 30 minutes - it is still available as STARTPAGE=build).
 setup_startpage() {
   ((DO_STARTPAGE)) || return 0
-  local dir="${HOME}/src/startpage"
+  case "$STARTPAGE" in
+    none)   return 0 ;;
+    build)  if ((DO_PLUGINS)); then build_startpage_full && return 0; fi ;;
+    static) ;;
+    *)      warn "STARTPAGE=${STARTPAGE} is not static|build|none - using static" ;;
+  esac
+  write_static_startpage
+}
+
+write_static_startpage() {
+  local dir="${HOME}/.local/share/startpage" links="${HOME}/.config/startpage/links.txt"
+  mkdir -p "$dir" "$(dirname -- "$links")"
+  if [[ ! -f $links ]]; then
+    cat > "$links" <<'EOF'
+# Group|Name|URL   (edit me, then run: bash dots.sh --configs-only)
+Arch|Arch Wiki|https://wiki.archlinux.org/
+Arch|AUR|https://aur.archlinux.org/
+Arch|Packages|https://archlinux.org/packages/
+Arch|Forum|https://bbs.archlinux.org/
+Dev|GitHub|https://github.com/
+Dev|MDN|https://developer.mozilla.org/
+Dev|Stack Overflow|https://stackoverflow.com/
+Dev|Hacker News|https://news.ycombinator.com/
+Media|YouTube|https://www.youtube.com/
+Media|Reddit|https://www.reddit.com/
+Media|Wikipedia|https://www.wikipedia.org/
+Srcery|Srcery colors|https://srcery.sh/
+Srcery|Iosevka|https://typeof.net/Iosevka/
+EOF
+  fi
+  {
+    cat <<'EOF'
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>start</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#1C1B19; --bg2:#2D2B28; --fg:#FCE8C3; --dim:#918175; --mag:#E02C6D; --yel:#FBB829; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 16px/1.5 "Iosevka", "Iosevka Term", "FiraCode Nerd Font", monospace; }
+  main { max-width: 56rem; margin: 0 auto; padding: 10vh 1.5rem 3rem; }
+  #clock { font-size: 3.2rem; color: var(--yel); letter-spacing: .05em; }
+  #date { color: var(--dim); margin-bottom: 2rem; }
+  form { margin-bottom: 2.5rem; }
+  input { width: 100%; padding: .6rem .8rem; font: inherit; color: var(--fg);
+    background: var(--bg2); border: 1px solid var(--bg2); outline: none; }
+  input:focus { border-color: var(--mag); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 1.5rem; }
+  h2 { margin: 0 0 .4rem; font-size: .9rem; font-weight: normal; color: var(--mag);
+    text-transform: uppercase; letter-spacing: .12em; border-bottom: 1px dashed var(--dim); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  a { color: var(--fg); text-decoration: none; display: block; padding: .1rem .3rem; }
+  a:hover, a:focus { background: var(--yel); color: var(--bg); outline: none; }
+</style></head><body><main>
+<div id="clock"></div><div id="date"></div>
+<form action="https://duckduckgo.com/" method="get">
+  <input name="q" type="search" placeholder="search" autocomplete="off" autofocus>
+</form>
+<div class="grid">
+EOF
+    awk -F'|' '
+      /^[[:space:]]*#/ || NF < 3 { next }
+      { gsub(/&/, "\\&amp;", $2); gsub(/&/, "\\&amp;", $3); gsub(/"/, "%22", $3)
+        if ($1 != g) { if (g != "") print "</ul></section>"; print "<section><h2>" $1 "</h2><ul>"; g = $1 }
+        printf "<li><a href=\"%s\">%s</a></li>\n", $3, $2 }
+      END { if (g != "") print "</ul></section>" }' "$links"
+    cat <<'EOF'
+</div></main>
+<script>
+  function tick() {
+    var d = new Date(), p = function (n) { return (n < 10 ? "0" : "") + n; };
+    document.getElementById("clock").textContent = p(d.getHours()) + ":" + p(d.getMinutes());
+    document.getElementById("date").textContent =
+      d.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  }
+  tick(); setInterval(tick, 10000);
+</script></body></html>
+EOF
+  } | put "$dir/index.html"
+  STARTPAGE_HOME="file://${dir}/index.html"
+  ok "Start page: ${dir/#$HOME/~}/index.html (links: ${links/#$HOME/~})"
+}
+
+# Optional, slow and fragile: the original ClojureScript start page. Output goes to
+# a log (never /dev/null), each step has a hard timeout, and it never blocks the run.
+build_startpage_full() {
+  local dir="${HOME}/src/startpage" blog="${TMPDIR:-/tmp}/dots-startpage-build.log"
   if ! have lein || ! have npm || ! have java; then
-    warn "start page skipped (needs leiningen, npm and java)"; return 0
+    warn "STARTPAGE=build needs leiningen, npm and java - using the static page"; return 1
   fi
   sync_repo "$STARTPAGE_URL" "${HOME}/src"
-  [[ -d $dir ]] || return 0
+  [[ -d $dir ]] || return 1
   [[ -f ${HOME}/TODOs.org ]] || cp "$dir/TODOs.example.org" "${HOME}/TODOs.org" 2>/dev/null || true
   cat > "$dir/config.edn" <<EOF
 {:reddit-feed-url "https://www.reddit.com/.json"
@@ -1505,9 +1628,12 @@ setup_startpage() {
  :todo-file "${HOME}/TODOs.org"}
 EOF
   if [[ ! -f $dir/target/prod/server.js ]]; then
-    log "Building the Firefox start page (firefox.png) - first build takes a few minutes..."
-    ( cd "$dir" && npm install --no-audit --no-fund >/dev/null 2>&1 && timeout 1800 lein min >/dev/null 2>&1 ) \
-      || { warn "start page build failed - Firefox opens its normal home page"; return 0; }
+    log "Building the Firefox start page (max 10 min per step; log: ${blog})..."
+    : > "$blog"
+    ( cd "$dir" \
+      && timeout -k 10 600 npm install --no-audit --no-fund </dev/null >>"$blog" 2>&1 \
+      && timeout -k 10 600 lein min </dev/null >>"$blog" 2>&1 ) \
+      || { warn "start page build failed or timed out (see ${blog}) - using the static page"; return 1; }
   fi
   mkdir -p "${HOME}/.config/systemd/user"
   cat > "${HOME}/.config/systemd/user/startpage.service" <<'EOF'
@@ -1527,6 +1653,8 @@ EOF
   systemctl --user enable --now startpage.service >/dev/null 2>&1 \
     && ok "start page running on http://localhost:8080" \
     || info "start page enabled for your next login"
+  STARTPAGE_HOME="http://localhost:8080"
+  return 0
 }
 
 firefox_profile_dir() {
@@ -1559,7 +1687,7 @@ setup_firefox() {
   prof="$(firefox_profile_dir 2>/dev/null)"
   if [[ -z $prof ]]; then
     # let Firefox create its normal default profile once, headless
-    MOZ_HEADLESS=1 timeout 25 firefox --headless --no-remote about:blank >/dev/null 2>&1 || true
+    MOZ_HEADLESS=1 timeout -k 5 25 firefox --headless --no-remote about:blank >/dev/null 2>&1 </dev/null || true
     pkill -u "$USER" -f 'firefox.*--headless' 2>/dev/null || true
     prof="$(firefox_profile_dir 2>/dev/null)"
   fi
@@ -1568,8 +1696,11 @@ setup_firefox() {
   fi
   mkdir -p "$prof/chrome"
   [[ -f $css ]] && ln -sfn "$css" "$prof/chrome/userChrome.css"
-  local home="about:home"
-  [[ -f ${HOME}/.config/systemd/user/startpage.service ]] && home="http://localhost:8080"
+  local home="$STARTPAGE_HOME"
+  if [[ -z $home && -f ${HOME}/.local/share/startpage/index.html && $STARTPAGE != none ]]; then
+    home="file://${HOME}/.local/share/startpage/index.html"
+  fi
+  [[ -n $home ]] || home="about:home"
   local uj="$prof/user.js" tmp; tmp="$(mktemp)"
   [[ -f $uj ]] && sed '/^\/\/ >>> dots.sh/,/^\/\/ <<< dots.sh/d' "$uj" > "$tmp"
   cat >> "$tmp" <<EOF
@@ -1608,13 +1739,30 @@ setup_zplug() {
 setup_tmux() {
   have tmux || { warn "tmux is not installed - skipping tpm"; return 0; }
   log "Installing tmux plugins (tpm)..."
-  mkdir -p "${HOME}/.tmux/plugins"
-  if [[ ! -d ${HOME}/.tmux/plugins/tpm ]]; then
-    git clone --quiet --depth 1 https://github.com/tmux-plugins/tpm "${HOME}/.tmux/plugins/tpm" \
+  local plug="${HOME}/.tmux/plugins" tlog="${TMPDIR:-/tmp}/dots-tpm.log" tdir rc
+  mkdir -p "$plug"
+  if [[ ! -d $plug/tpm ]]; then
+    timeout 120 git clone --quiet --depth 1 https://github.com/tmux-plugins/tpm "$plug/tpm" \
       || { warn "could not clone tpm"; return 0; }
   fi
-  "${HOME}/.tmux/plugins/tpm/bin/install_plugins" >/dev/null 2>&1 \
-    || info "tpm returned non-zero; press \` then I inside tmux to finish it"
+  # tpm finds the plugin directory by asking a RUNNING tmux server that has loaded
+  # ~/.tmux.conf; with no server it fails. Start a throw-away one on its own
+  # socket directory (your real tmux is not touched), install, then stop it.
+  tdir="$(mktemp -d)"; : > "$tlog"
+  (
+    unset TMUX
+    export TMUX_TMPDIR="$tdir" TMUX_PLUGIN_MANAGER_PATH="${plug}/"
+    tmux new-session -d -s dots-tpm >>"$tlog" 2>&1 || exit 1
+    tmux set-environment -g TMUX_PLUGIN_MANAGER_PATH "${plug}/" >>"$tlog" 2>&1
+    timeout 600 "${plug}/tpm/bin/install_plugins" >>"$tlog" 2>&1
+    rc=$?
+    tmux kill-server >/dev/null 2>&1
+    exit "$rc"
+  )
+  rc=$?
+  rm -rf "$tdir"
+  if ((rc == 0)); then ok "tmux plugins installed"
+  else info "tpm did not finish (log: ${tlog}); press \` then I inside tmux to finish it"; fi
 }
 
 setup_vim() {
